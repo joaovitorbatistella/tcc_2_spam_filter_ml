@@ -1,4 +1,6 @@
-!/output
-/output/*.joblib
+/input/*
+/output/*
 *.ods
 *.ods#
+/trash
+/src/__pycache__
