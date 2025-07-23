@@ -1,5 +1,7 @@
 import pandas as pd
 import os
+import logging
+import html2text
 from datetime import datetime
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -19,6 +21,7 @@ import sys
 import joblib
 from AlgorithmEnum import Algorithm as AlgorithmEnum
 from BinaryClassificationPlot import BinaryClassificationPlot
+import re
 
 # temporary
 from sklearn.datasets import fetch_20newsgroups
@@ -44,8 +47,107 @@ class SpamClassifier:
         self.cv_scores          = None
         self.plot               = None
 
+    def remove_spamassassin_terms(self, text):
+        # Remove links containing “spamassassin”
+        text = re.sub(r'https?://\S*spamassassin\S*', '', text, flags=re.IGNORECASE)
+
+        return text
+
+    def remove_words_regex(self, text, words_to_remove, case_sensitive=False):
+        """
+        Versão alternativa usando regex para remoção mais precisa.
+        
+        Args:
+            text (str): Texto original
+            words_to_remove (list): Lista de palavras a serem removidas
+            case_sensitive (bool): Se True, considera maiúsculas/minúsculas. Default: False
+        
+        Returns:
+            str: Texto com as palavras removidas
+        """
+        import re
+        
+        if not text or not words_to_remove:
+            return text
+        
+        escaped_words = [re.escape(word) for word in words_to_remove]
+        
+        pattern = r'\b(?:' + '|'.join(escaped_words) + r')\b'
+        
+        flags = re.IGNORECASE if not case_sensitive else 0
+        
+        result = re.sub(pattern, '', text, flags=flags)
+        
+        result = re.sub(r'\s+', ' ', result).strip()
+        
+        return result
+    
+    def remove_after_phrase(self, text, phrase="email is sponsored by", case_sensitive=False, include_phrase=True):
+        """
+        Remove tudo que estiver depois de uma frase específica no texto.
+        
+        Args:
+            text (str): Texto original
+            phrase (str): Frase a partir da qual remover o resto do texto
+            case_sensitive (bool): Se True, considera maiúsculas/minúsculas. Default: False
+            include_phrase (bool): Se True, remove também a frase encontrada. Default: True
+        
+        Returns:
+            str: Texto até a frase especificada (incluindo ou não a frase)
+        """
+        if not text or not phrase:
+            return text
+        
+        # Prepara o texto para busca
+        search_text = text if case_sensitive else text.lower()
+        search_phrase = phrase if case_sensitive else phrase.lower()
+        
+        # Encontra a posição da frase
+        position = search_text.find(search_phrase)
+        
+        # Se a frase não foi encontrada, retorna o texto original
+        if position == -1:
+            return text
+        
+        # Se deve incluir a frase, corta antes dela
+        if not include_phrase:
+            return text[:position + len(phrase)]
+        else:
+            return text[:position]
+        
+    def remove_urls(self, text):
+        # Padrão para identificar URLs
+        url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        # Substitui URLs por uma string vazia
+        return re.sub(url_pattern, '', text)
+
     def remove_stops(self, text, stops):
+        # Remove weird formatting characters
+        h = html2text.HTML2Text()
+        h.ignore_links = True
+
+        text = h.handle(text)
+
+        text = re.sub(r'[\n\r\t]|\\n|\\r|\\t', ' ', text)
+
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        text = self.remove_after_phrase(text, 'email is sponsored by')
+
+        text = self.remove_words_regex(text, ['sightings', 'sight', 'spamassassin', 'DeathToSpamDeathToSpamDeathToSpam', 'remove', 'removed'])
+
+        text = self.remove_words_regex(text, ['inject', 'scribble', 'preparation', 'bloggy', 'reflections', 'wozz'])
+
+        text = self.remove_urls(text)
+
+        text = self.remove_spamassassin_terms(text)
+
         words = text.split()
+
+        # term = 'textual'
+        # if term in words:
+        #     logging.info(f"A string contém o termo '{term}': {text}")
+
         final = []
         for word in words:
             if word not in stops:
@@ -53,8 +155,9 @@ class SpamClassifier:
         final = " ".join(final)
         final = final.translate(str.maketrans("", "", string.punctuation))
         final = "".join([i for i in final if not i.isdigit()])
-        while "  " in final:
-            final = final.replace("  ", " ")
+        # while "  " in final:
+        #     final = final.replace("  ", " ")
+        final = re.sub(r'\s+', ' ', final).strip()
         return (final)
 
     def clean_docs(self, docs):
@@ -78,7 +181,7 @@ class SpamClassifier:
 
     def load_sample_data(self):
         """Load sample data"""
-        print("Loading sample data...")
+        logging.info("Loading sample data...")
 
         # Select two categories for binary classification
         categories = ['alt.atheism', 'soc.religion.christian']
@@ -105,7 +208,45 @@ class SpamClassifier:
         return X, y, ['0', '1']
 
     def create_pipeline(self):
-        """Create pipeline with TF-IDF and Logistic Regression"""
+        """Create full pipeline with TF-IDF and Logistic Regression"""
+        models = {
+            'logistic-regression': LogisticRegression(
+                                        random_state=42,
+                                        C=20.0,
+                                        class_weight='balanced',
+                                        max_iter=1000,
+                                        penalty='l2',
+                                        solver='liblinear'
+                                    ),
+            'naive-bayes': MultinomialNB(
+                                alpha=0.1,
+                                fit_prior=True,
+                                force_alpha=True
+                            ),
+            'decision-tree': DecisionTreeClassifier(random_state=42)
+        }
+        
+        if self.algorithm_enum.value not in models:
+            raise ValueError(f"Modelo '{self.algorithm_enum.value}' não suportado.")
+
+        pipeline = Pipeline([
+            ('tfidf', TfidfVectorizer(
+                        max_features=20000,
+                        min_df=0.001,
+                        max_df=0.7,
+                        ngram_range=(1, 1),
+                        norm='l2',
+                        stop_words='english',
+                        sublinear_tf=True,
+                    )
+            ),
+            ('classifier', models[self.algorithm_enum.value])
+        ])
+        
+        return pipeline
+
+    def create_basic_pipeline(self):
+        """Create basic pipeline with TF-IDF and Logistic Regression"""
         models = {
             'logistic-regression': LogisticRegression(random_state=42),
             'naive-bayes': MultinomialNB(),
@@ -122,15 +263,15 @@ class SpamClassifier:
         
         return pipeline
     
-    def define_param_grid(self):
+    def define_param_grid(self, _10percent):
         """Define a params grid optimized for binary classification"""
 
         # IF-IDF params
         tfidf_params = {
-            'tfidf__max_features': [1000,3500,5000,10000], # More features to capture patterns
-            'tfidf__ngram_range':  [(1,1), (1,2),], # Important bigrams
-            'tfidf__min_df':       [1, 2], # Smaller min_df for rare spam words
-            'tfidf__max_df':       [0.7, 0.8, 0.9], # Remove very common words
+            'tfidf__max_features': [20000], # More features to capture patterns
+            'tfidf__ngram_range':  [(1,1), (1,2)], # Important bigrams
+            'tfidf__min_df':       [0.0005, 0.001, _10percent], # Smaller min_df for rare spam words
+            'tfidf__max_df':       [0.7], # Remove very common words
             'tfidf__stop_words':   ['english'], # Remove or not Stopwords
             'tfidf__sublinear_tf': [True], # Always True to spam (replace tf with 1 + log(tf)) | Default: False
             'tfidf__norm':         ['l2'], # Normalization
@@ -139,28 +280,65 @@ class SpamClassifier:
         # Parâmetros específicos por modelo
         model_params = {
             'logistic-regression': {
-                'classifier__C':            [0.1, 5.0, 10.0],
+                'classifier__C':            [15.0, 20.0],
                 'classifier__solver':       ['liblinear'],
-                'classifier__penalty':      ['l1', 'l2'],
-                'classifier__class_weight': [{0: 1, 1: 5}, 'balanced'],
-                'classifier__max_iter':     [1000, 2000],
+                'classifier__penalty':      ['l2'],
+                'classifier__class_weight': ['balanced'],
+                'classifier__max_iter':     [1000],
             },
             'naive-bayes': {
-                'classifier__alpha':        [0.1, 3.0, 5.0, 10.0],
-                'classifier__force_alpha':  [True, False],
-                'classifier__fit_prior':    [True, False],
+                'classifier__alpha':        [0.1, 3.0],
+                'classifier__force_alpha':  [True],
+                'classifier__fit_prior':    [True],
             },
-            'decision-tree': {
-                'classifier__criterion':                ['gini', 'entropy'],
-                'classifier__max_depth':                [8, 10, 15, 20, None],
-                'classifier__min_samples_split':        [10, 20, 50],
-                'classifier__min_samples_leaf':         [5, 10, 20],
-                'classifier__max_features':             ['sqrt', 'log2', 0.3, 0.5, None],
-                'classifier__min_impurity_decrease':    [0.0, 0.001, 0.01],
-                'classifier__class_weight':             ['balanced', None, {0: 1, 1: 3}],
-                'classifier__ccp_alpha':                [0.0, 0.01, 0.1],
-            }
+            # 'decision-tree': {
+            #     'classifier__criterion':                ['gini', 'entropy'],
+            #     'classifier__max_depth':                [8, 10, 15, 20, None],
+            #     'classifier__min_samples_split':        [10, 20, 50],
+            #     'classifier__min_samples_leaf':         [5, 10, 20],
+            #     'classifier__max_features':             ['sqrt', 'log2', 0.3, 0.5, None],
+            #     'classifier__min_impurity_decrease':    [0.0, 0.001, 0.01],
+            #     'classifier__class_weight':             ['balanced', None, {0: 1, 1: 3}],
+            #     'classifier__ccp_alpha':                [0.0, 0.01, 0.1],
+            # },
         }
+
+        # # IF-IDF params
+        # tfidf_params = {
+        #     'tfidf__max_features': [1000,3500,5000,10000], # More features to capture patterns
+        #     'tfidf__ngram_range':  [(1,1), (1,2),], # Important bigrams
+        #     'tfidf__min_df':       [1, 2], # Smaller min_df for rare spam words
+        #     'tfidf__max_df':       [0.7, 0.8, 0.9], # Remove very common words
+        #     'tfidf__stop_words':   ['english'], # Remove or not Stopwords
+        #     'tfidf__sublinear_tf': [True], # Always True to spam (replace tf with 1 + log(tf)) | Default: False
+        #     'tfidf__norm':         ['l2','l1'], # Normalization
+        # }
+        
+        # # Parâmetros específicos por modelo
+        # model_params = {
+        #     'logistic-regression': {
+        #         'classifier__C':            [0.1, 1.0, 5.0, 10.0, 15.0],
+        #         'classifier__solver':       ['liblinear'],
+        #         'classifier__penalty':      ['l1', 'l2'],
+        #         'classifier__class_weight': [{0: 1, 1: 5}, 'balanced'],
+        #         'classifier__max_iter':     [1000, 1500],
+        #     },
+        #     'naive-bayes': {
+        #         'classifier__alpha':        [0.1, 3.0, 5.0, 10.0],
+        #         'classifier__force_alpha':  [True, False],
+        #         'classifier__fit_prior':    [True, False],
+        #     },
+        #     # 'decision-tree': {
+        #     #     'classifier__criterion':                ['gini', 'entropy'],
+        #     #     'classifier__max_depth':                [8, 10, 15, 20, None],
+        #     #     'classifier__min_samples_split':        [10, 20, 50],
+        #     #     'classifier__min_samples_leaf':         [5, 10, 20],
+        #     #     'classifier__max_features':             ['sqrt', 'log2', 0.3, 0.5, None],
+        #     #     'classifier__min_impurity_decrease':    [0.0, 0.001, 0.01],
+        #     #     'classifier__class_weight':             ['balanced', None, {0: 1, 1: 3}],
+        #     #     'classifier__ccp_alpha':                [0.0, 0.01, 0.1],
+        #     # },
+        # }
         
         if self.algorithm_enum.value not in model_params:
             raise ValueError(f"Modelo '{self.algorithm_enum.value}' não suportado")
@@ -170,15 +348,24 @@ class SpamClassifier:
         
         return param_grid
     
+    def train_without_grid_search(self, X_train, y_train):
+        """Training the binary classification model"""
+        logging.info("Starting...")
+        self.pipeline = self.create_pipeline()
+        self.pipeline.fit(X_train, y_train)
+
     def train_with_grid_search(self, X_train, y_train, cv_folds=5):
         """Training the model using GridSearchCV optimized for binary classification"""
-        print("Starting Grid Search with Cross-Validation...")
+        logging.info("Starting Grid Search with Cross-Validation...")
 
         # Create pipeline
-        pipeline = self.create_pipeline()
+        pipeline = self.create_basic_pipeline()
+
+        _10percent = int(len(X_train)*0.03)
+        logging.info(F"_10percent: {_10percent}")
 
         # Define params grid
-        param_grid = self.define_param_grid()
+        param_grid = self.define_param_grid(_10percent)
 
         # Set up GridSearchCV with multiple metrics
         grid_search = GridSearchCV(
@@ -186,7 +373,7 @@ class SpamClassifier:
             param_grid=param_grid,
             cv=cv_folds,
             scoring='accuracy',
-            n_jobs=8,
+            n_jobs=10,
             verbose=1,
             return_train_score=True
         )
@@ -198,10 +385,10 @@ class SpamClassifier:
         self.pipeline = grid_search.best_estimator_
         self.best_params = grid_search.best_params_
 
-        print(f"Best score CV (precision): {grid_search.best_score_:.4f}")
-        print("Best params")
+        logging.info(f"Best score CV (precision): {grid_search.best_score_:.4f}")
+        logging.info("Best params")
         for param, value in self.best_params.items():
-            print(f"   {param}: {value}")
+            logging.info(f"   {param}: {value}")
 
         return grid_search
     
@@ -210,7 +397,8 @@ class SpamClassifier:
         if self.pipeline is None:
             raise ValueError("A model must be trained first!")
         
-        print(f"\nExecuting cross validation with {cv_folds} folds...")
+        logging.info("\n")
+        logging.info(f"Executing cross validation with {cv_folds} folds...")
 
         # Multiple metrics for binary classification
         metrics = ['accuracy', 'precision', 'recall', 'f1', 'roc_auc']
@@ -224,7 +412,7 @@ class SpamClassifier:
             # scores = cross_val_score(self.pipeline, X, y, cv=cv_folds, scoring=metric)
 
             train_sizes_abs, train_scores, val_scores = learning_curve(
-                self.pipeline, X, y, cv=cv_folds, train_sizes=train_sizes, scoring=metric, n_jobs=8
+                self.pipeline, X, y, cv=cv_folds, train_sizes=train_sizes, scoring=metric, n_jobs=10
             )
 
             for i, train_size in enumerate(train_sizes):
@@ -233,7 +421,7 @@ class SpamClassifier:
                 results[metric][f"{train_size}"]['val_scores']      = val_scores[i]
                 results[metric][f"{train_size}"]['train_sizes_abs'] = train_sizes_abs[i]
             
-            print(f"{metric.upper()}: {val_scores[len(train_sizes)-1].mean():.4f} (+/- {val_scores[len(train_sizes)-1].std() * 2:.4f})")
+            logging.info(f"{metric.upper()}: {val_scores[len(train_sizes)-1].mean():.4f} (+/- {val_scores[len(train_sizes)-1].std() * 2:.4f})")
 
         self.cv_scores = results
         return results
@@ -323,31 +511,30 @@ class SpamClassifier:
 
         plt.savefig(f"{self.output_base_path}/thresholds-comparison-fp-fn-rate.png")
 
-    def evaluate_with_multiple_thresholds(self, X_test, y_test, target_names, thresholds=[0.3, 0.5, 0.7]):
+    def evaluate_with_multiple_thresholds(self, y_test, y_pred_proba, thresholds=[0.3, 0.5, 0.7]):
         """Evaluate the model with multiple thresholds to compare"""
         if self.pipeline is None:
             raise("Model must be trained first!")
         
-        print("\n" + "="*60)
-        print("Evaluation with multiple Thresholds")
-        print("="*60)
-
-        # Get probabilities
-        y_pred_proba = self.pipeline.predict_proba(X_test)[:, 1]
+        logging.info("\n")
+        logging.info("="*60)
+        logging.info("Evaluation with multiple Thresholds")
+        logging.info("="*60)
 
         results = {}
 
-        fig, axes = plt.subplots(1, len(thresholds), figsize=(5 * len(thresholds), 4))
+        # fig, axes = plt.subplots(1, len(thresholds), figsize=(5 * len(thresholds), 4))
 
         for i, threshold in enumerate(thresholds):
-            print(f"\n--- Threshold: {threshold:.1f} ---")
+            logging.info("\n")
+            logging.info(f"--- Threshold: {threshold:.1f} ---")
 
             # Predictions with custom threshold
             y_pred = (y_pred_proba >= threshold).astype(int)
-            # print("\n" + "="*60)
-            # print("y_pred_proba")
-            # print(y_pred)
-            # print("="*60)
+            # logging.info("\n" + "="*60)
+            # logging.info("y_pred_proba")
+            # logging.info(y_pred)
+            # logging.info("="*60)
 
             # Calculate metrics
             accuracy = accuracy_score(y_test, y_pred)
@@ -357,13 +544,30 @@ class SpamClassifier:
 
             # Confusion matrix
             cm = confusion_matrix(y_test, y_pred)
+
+            fig, ax = plt.subplots(figsize=(5, 4))
+
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                        xticklabels=['Positive', 'Negative'],
-                        yticklabels=['Positive', 'Negative'],
-                        ax=axes[i])
-            axes[i].set_title(f'Threshold = {threshold}')
-            axes[i].set_xlabel('Predito')
-            axes[i].set_ylabel('Real')
+                   xticklabels=['Negative', 'Positive'],
+                   yticklabels=['Negative', 'Positive'],
+                   ax=ax
+                )
+            ax.set_title(f'{self.algorithm_enum.get_name()} - Threshold = {threshold}')
+            ax.set_xlabel('Predito')
+            ax.set_ylabel('Real')
+
+            # Save individual heatmap
+            plt.tight_layout()
+            plt.savefig(f"{self.output_base_path}/heatmap-threshold-{threshold:.1f}.png")
+            plt.close()
+            
+            # sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+            #             xticklabels=['Positive', 'Negative'],
+            #             yticklabels=['Positive', 'Negative'],
+            #             ax=axes[i])
+            # axes[i].set_title(f'Threshold = {threshold}')
+            # axes[i].set_xlabel('Predito')
+            # axes[i].set_ylabel('Real')
 
             tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (0, 0, 0, 0)
 
@@ -371,36 +575,37 @@ class SpamClassifier:
             fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
             fnr = fn / (fn + tp) if (fn + tp) > 0 else 0
 
-            # print(f"Accuracy:  {accuracy:.4f}")
-            # print(f"Precision: {precision:.4f} (False Positives: {fp})")
-            # print(f"Recall:    {recall:.4f} (False Negatives: {fn})")
-            # print(f"F1-Score:  {f1:.4f}")
-            # print(f"FPR:       {fpr:.4f} (False Positives Rate)")
-            # print(f"FNR:       {fnr:.4f} (False Negatives Rate)")
+            # logging.info(f"Accuracy:  {accuracy:.4f}")
+            # logging.info(f"Precision: {precision:.4f} (False Positives: {fp})")
+            # logging.info(f"Recall:    {recall:.4f} (False Negatives: {fn})")
+            # logging.info(f"F1-Score:  {f1:.4f}")
+            # logging.info(f"FPR:       {fpr:.4f} (False Positives Rate)")
+            # logging.info(f"FNR:       {fnr:.4f} (False Negatives Rate)")
             
             results[threshold] = {
                 'accuracy': accuracy, 'precision': precision, 'recall': recall,
-                'f1': f1, 'fpr': fpr, 'fnr': fnr, 'fp': fp, 'fn': fn
+                'f1': f1, 'fpr': fpr, 'fnr': fnr, 'tn': tn, 'fp': fp, 'fn': fn, 'tp': tp
             }
 
-        plt.tight_layout()
-        plt.suptitle(f"{self.algorithm_enum.get_name()}", fontsize=16, fontweight='bold')
+        # plt.tight_layout()
+        # plt.suptitle(f"{self.algorithm_enum.get_name()}", fontsize=16, fontweight='bold')
 
-        plt.savefig(f"{self.output_base_path}/heatmap-per-threshold.png")
+        # plt.savefig(f"{self.output_base_path}/heatmap-per-threshold.png")
 
         # Comparative view
         self._plot_threshold_comparison(results)
 
-        return results, y_pred, y_pred_proba, y_test
+        return results
     
     def evaluate_model(self, X_test, y_test, target_names):
         """Evaluates the model on the test set with specific metrics for binary classification"""
         if self.pipeline is None:
             raise ValueError("Model must be trained first!")
         
-        print("\n" + "="*50)
-        print("Evaluation on test set")
-        print("="*50)
+        logging.info("\n")
+        logging.info("="*50)
+        logging.info("Evaluation on test set")
+        logging.info("="*50)
 
         # Predictions
         y_pred       = self.pipeline.predict(X_test)
@@ -410,12 +615,13 @@ class SpamClassifier:
         accuracy  = accuracy_score(X_test, y_pred)
         auc_score = roc_auc_score(y_test, y_pred_proba)
 
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"AUC-ROC: {auc_score:.4f}")
+        logging.info(f"Accuracy: {accuracy:.4f}")
+        logging.info(f"AUC-ROC: {auc_score:.4f}")
         
         # Detailed report
-        print("\nDetailed report")
-        print(classification_report(y_test, y_pred, target_names=target_names, zero_division=0))
+        logging.info("\n")
+        logging.info("Detailed report")
+        logging.info(classification_report(y_test, y_pred, target_names=target_names, zero_division=0))
 
         # Views
         self._plot_evaluation_results(y_test, y_pred, y_pred_proba, target_names)
@@ -425,7 +631,7 @@ class SpamClassifier:
     def plot_cv_scores(self, X_train, X_test, y_train, y_test, feature_names=None, class_names=['0', '1']):
         """Plot cross validation scored for multiple metrics"""
         if self.cv_scores is None:
-            print("Execute cross validation first!")
+            logging.info("Execute cross validation first!")
             return
             
         n_metrics = len(self.cv_scores)
@@ -444,7 +650,7 @@ class SpamClassifier:
         
         for i, (metric, scores) in enumerate(self.cv_scores.items()):
             if(metric.lower() == 'accuracy'):
-                print('accuracy scores', scores['1.0']['val_scores'])
+                logging.info(f"accuracy scores {scores['1.0']['val_scores']}")
                 
             axes[i].boxplot(scores['1.0']['val_scores'])
             axes[i].set_title(f"{metric.upper()}\nAverage: {scores['1.0']['val_scores'].mean():.4f}")
@@ -462,13 +668,13 @@ class SpamClassifier:
         # plt.show()
 
         # Generating reports
-        print("Generating analyses...")
+        logging.info("Generating analyses...")
         self.plot.plot_roc_curve()
         self.plot.plot_precision_recall_curve()
         self.plot.plot_class_distribution()
         self.plot.plot_learning_curves(self.cv_scores)
         self.plot.generate_complete_report()
-
+        self.plot.analyze_tfidf_features(32)
 
     def predict_with_confidence(self, texts):
         """Make predictions with confidence intervals"""
@@ -491,7 +697,12 @@ class SpamClassifier:
             })
 
         return results
-    
+
+def string_to_boolean(s):
+    bool_map = {"true": True, "false": False}
+
+    return bool_map.get(s.strip().lower(), False)
+
 def main():
     """Main function to demonstrate full use"""
     # Read  arguments
@@ -504,6 +715,13 @@ def main():
             continue
         
         new_args[value] = args[i+1]
+
+    # Read algorithm setting (Default: 'logistic-regression')
+    w_grid_search = new_args.get('-g')
+    if(w_grid_search == None or (w_grid_search != None and w_grid_search not in ['True', 'False'])):
+        w_grid_search = 'True'
+
+    w_grid_search = string_to_boolean(w_grid_search)
 
     # Read algorithm setting (Default: 'logistic-regression')
     algorithm = new_args.get('-a')
@@ -521,19 +739,31 @@ def main():
     classifier = SpamClassifier(AlgorithmEnum(algorithm), scoring, input_file_name)
 
     os.makedirs(classifier.output_base_path, exist_ok=True)
-    sys.stdout = open(f"{classifier.output_base_path}/stdout.log", 'w', encoding='utf-8')
+    # sys.stdout = open(f"{classifier.output_base_path}/stdout.log", 'w', encoding='utf-8')
 
-    print("="*60)
-    print(f"Binary classification with TF-IDF and {classifier.algorithm_enum.get_name()}")
-    print("="*60)
+    # Configurar o logging
+    logging.basicConfig(
+        filename=f"{classifier.output_base_path}/stdout.log",
+        filemode='w',  # 'w' para sobrescrever, 'a' para adicionar
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        level=logging.INFO,
+        encoding='utf-8'
+    )
+
+    if(w_grid_search):
+        logging.info('With GridSearchCV')
+
+    logging.info("="*60)
+    logging.info(f"Binary classification with TF-IDF and {classifier.algorithm_enum.get_name()}")
+    logging.info("="*60)
 
     # Data loading
     # X, y, target_names = classifier.load_sample_data()
     X, y, target_names = classifier.load_real_data()
-    print(f"Dataset loaded: {len(X)} samples")
-    print(f"Classes: {target_names}")
+    logging.info(f"Dataset loaded: {len(X)} samples")
+    logging.info(f"Classes: {target_names}")
     
-    # print(f"Distribuição das classes: {np.bincount(y)}")
+    logging.info(f"Distribuição das classes: {np.bincount(y)}")
 
     # Data split
     # - Split arrays or matrices into random train and test subsets.
@@ -543,11 +773,17 @@ def main():
         X, y, test_size=0.2, random_state=42, stratify=y
     )
 
-    print(f"Train: {len(X_train)} samples")
-    print(f"Test: {len(X_test)} samples")
+    logging.info(f"Train: {len(X_train)} samples")
+    logging.info(f"Test: {len(X_test)} samples")
 
-    # Train with Grid Search
-    grid_search = classifier.train_with_grid_search(X_train, y_train, cv_folds=5)
+    grid_search = None
+
+    if(w_grid_search):
+        # Train with Grid Search
+        grid_search = classifier.train_with_grid_search(X_train, y_train, cv_folds=5)
+    else:
+        # Train without Grid Search
+        classifier.train_without_grid_search(X_train, y_train)
 
     # Complete cross validation
     cv_results  = classifier.cross_validate(X_train, y_train, cv_folds=5)
@@ -556,14 +792,16 @@ def main():
     threshold_results = None
     accuracy = None
     auc = None
-    y_pred = None
-    y_pred_proba = None
     
+    # Get probabilities
+    y_pred_proba = classifier.pipeline.predict_proba(X_test)[:, 1]
+    y_pred = (y_pred_proba >= 0.5).astype(int)
+
     # accuracy, auc, y_pred, y_pred_proba = classifier.evaluate_model(
     #     X_test, y_test, target_names
     # )
-    threshold_results, y_pred, y_pred_proba, y_test = classifier.evaluate_with_multiple_thresholds(
-        X_test, y_test, target_names, thresholds=[0.3, 0.5, 0.6, 0.7]
+    threshold_results = classifier.evaluate_with_multiple_thresholds(
+        y_test, y_pred_proba, thresholds=[0.3, 0.5, 0.6, 0.7]
     )
 
     feature_names = classifier.pipeline[:-1].get_feature_names_out()
@@ -588,29 +826,37 @@ def main():
     # # Salvar modelo completo
     joblib.dump(classifier.pipeline, f"{classifier.output_base_path}/model.pkl")
     
-    print("\n" + "="*50)
-    print("Summary of Results")
-    print("="*50)
-    print(f"Best CV Score (AUC): {grid_search.best_score_:.4f}")
-    print(f"AVG CV Accuracy: {cv_results['accuracy']['1.0']['val_scores'].mean():.4f}")
-    print(f"AVG CV F1: {cv_results['f1']['1.0']['val_scores'].mean():.4f}")
-    print(f"AVG CV AUC: {cv_results['roc_auc']['1.0']['val_scores'].mean():.4f}")
+    logging.info("\n")
+    logging.info("="*50)
+    logging.info("Summary of Results")
+    logging.info("="*50)
+
+    if(w_grid_search):
+        logging.info(f"Best CV Score (AUC): {grid_search.best_score_:.4f}")
+    
+    logging.info(f"AVG CV Accuracy: {cv_results['accuracy']['1.0']['val_scores'].mean():.4f}")
+    logging.info(f"AVG CV F1: {cv_results['f1']['1.0']['val_scores'].mean():.4f}")
+    logging.info(f"AVG CV AUC: {cv_results['roc_auc']['1.0']['val_scores'].mean():.4f}")
 
     if threshold_results is None:
-        print(f"Test Average: {accuracy:.4f}")
-        print(f"Test AUC: {auc:.4f}")
+        logging.info(f"Average: {accuracy:.4f}")
+        logging.info(f"AUC: {auc:.4f}")
     else:
-        print("\nThreshold Results:")
+        logging.info("\n")
+        logging.info("Threshold Results:")
         for result in threshold_results:
-            print(f"\nThreshold: {result}")
-            print(f"   - Test Average: {threshold_results[result]['accuracy']:.4f}")
-            print(f"   - Test Precision: {threshold_results[result]['precision']:.4f}")
-            print(f"   - Test Recall: {threshold_results[result]['recall']:.4f}")
-            print(f"   - Test F1: {threshold_results[result]['f1']:.4f}")
-            print(f"   - Test fpr: {threshold_results[result]['fpr']:.4f}")
-            print(f"   - Test fnr: {threshold_results[result]['fnr']:.4f}")
-            print(f"   - Test fp: {threshold_results[result]['fp']:.4f}")
-            print(f"   - Test fn: {threshold_results[result]['fn']:.4f}")
+            logging.info("\n")
+            logging.info(f"Threshold: {result}")
+            logging.info(f"   - Average: {threshold_results[result]['accuracy']:.4f}")
+            logging.info(f"   - Precision: {threshold_results[result]['precision']:.4f}")
+            logging.info(f"   - Recall: {threshold_results[result]['recall']:.4f}")
+            logging.info(f"   - F1: {threshold_results[result]['f1']:.4f}")
+            logging.info(f"   - fpr: {threshold_results[result]['fpr']:.4f}")
+            logging.info(f"   - fnr: {threshold_results[result]['fnr']:.4f}")
+            logging.info(f"   - tn: {threshold_results[result]['tn']:.4f}")
+            logging.info(f"   - fp: {threshold_results[result]['fp']:.4f}")
+            logging.info(f"   - fn: {threshold_results[result]['fn']:.4f}")
+            logging.info(f"   - tp: {threshold_results[result]['tp']:.4f}")
 
     return classifier, grid_search
 
@@ -626,7 +872,7 @@ def __old():
 
 
     # Talvez fazer o encode de carcteres HTML(ex: &lt; (<)) !!!
-    def remove_stops(text, stops):
+    def remove_stops(text, stops):       
         words = text.split()
         final = []
         for word in words:
@@ -692,8 +938,8 @@ def __old():
             x=x+1
         all_keywords.append(keywords)
 
-    # print(corpus[442])
-    # print(all_keywords[442])
+    # logging.info(corpus[442])
+    # logging.info(all_keywords[442])
 
 
     # Dividir em treino e teste
@@ -746,16 +992,17 @@ def __old():
     prediction = model.predict(corpus_test)
 
     # Avaliar o modelo
-    print("Relatório de Classificação: (classification_report)")
-    print(classification_report(target_test, prediction))
+    logging.info("Relatório de Classificação: (classification_report)")
+    logging.info(classification_report(target_test, prediction))
 
-    print("Relatório de Classificação (confusion_matrix):")
-    print(confusion_matrix(target_test, prediction))
+    logging.info("Relatório de Classificação (confusion_matrix):")
+    logging.info(confusion_matrix(target_test, prediction))
 
     # Validação cruzada
     cv_scores = cross_val_score(model, corpus_train, target_train, cv=5)
-    print("\nScores da Validação Cruzada:")
-    print(f"Acurácia média: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
+    logging.info("\n")
+    logging.info("Scores da Validação Cruzada:")
+    logging.info(f"Acurácia média: {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
 
     # # Salvar o modelo treinado
     # import joblib
