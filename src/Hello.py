@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import joblib
-import os
-
-dirname = os.path.dirname(__file__)
+import requests
+import io
 
 # Configuração da página
 st.set_page_config(
@@ -14,27 +13,27 @@ st.set_page_config(
 
 MODELS_CONFIG = {
     "Naive Bayes DT1": {
-        "path": "./output/spam/naive-bayes/scoring_accuracy/20250707-2342/model.pkl",
+        "url": "https://drive.usercontent.google.com/uc?id=1Osl958XLB2vYUbqrGpSyan2ERTPvDnq6",
         "description": "Modelo Naive Bayes - Dataset 1"
     },
     "Naive Bayes DT2": {
-        "path": "./output/spam_ham_dataset/naive-bayes/scoring_accuracy/20250715-2336/model.pkl", 
+        "url": "https://drive.usercontent.google.com/uc?id=1RjMEaZpnv0ixyhJ861FogZ4C_gGz202V", 
         "description": "Modelo Naive Bayes - Dataset 2"
     },
     "Naive Bayes DT3": {
-        "path": "./output/spamassassin/naive-bayes/scoring_accuracy/20250707-2338/model.pkl",
+        "url": "https://drive.usercontent.google.com/uc?id=1kH7QgWubTweJ8CJy_zQ4S-jzV-bmSaji",
         "description": "Modelo Naive Bayes - Dataset 3"
     },
     "Logistic Regression DT1": {
-        "path": "./output/spam/logistic-regression/scoring_accuracy/20250707-2345/model.pkl",
+        "url": "https://drive.usercontent.google.com/uc?id=1lnIcTIb6nkQRtTLinyRAm79B9mfnRFv7",
         "description": "Regressão Logística - Dataset 1"
     },
     "Logistic Regression DT2": {
-        "path": "./output/spam_ham_dataset/logistic-regression/scoring_accuracy/20250715-2328/model.pkl",
+        "url": "https://drive.usercontent.google.com/uc?id=1Hj5Qh5PAzGE7xxUiuRPT9TJ6XmiNzVq6",
         "description": "Regressão Logística - Dataset 2"
     },
     "Logistic Regression DT3": {
-        "path": "./output/spamassassin/logistic-regression/scoring_accuracy/20250715-2249/model.pkl",
+        "url": "https://drive.usercontent.google.com/uc?id=1RPJx0UrnHzwAXdERQfQy7dEEVi3Q3uRl", # &export=download
         "description": "Regressão Logística - Dataset 3"
     }
 }
@@ -96,10 +95,11 @@ def load_model(model_name):
     Carrega o modelo escolhido pelo usuário.
     """
     try:
-        model_path = MODELS_CONFIG[model_name]["path"]
+        model_url = MODELS_CONFIG[model_name]["url"]
 
-        # Opção 2: Modelo salvo with joblib
-        model = joblib.load(model_path)
+        response = requests.get(model_url)
+
+        model = joblib.load(io.BytesIO(response.content))
 
         return model, None
     except FileNotFoundError:
@@ -205,32 +205,6 @@ if model is not None:
                         st.markdown(f"<div style='background-color: #44ff44; padding: 5px; border-radius: 5px; text-align: center; color: white;'><b>Abaixo do limiar ({threshold*100:.0f}%) → HAM</b></div>", unsafe_allow_html=True)
         else:
             st.warning("⚠️ Por favor, digite uma mensagem para analisar.")
-    
-    # Exemplos de uso com comparação
-    st.markdown("---")
-    st.subheader("💡 Teste Rápido dos Modelos:")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**Exemplo de HAM:**")
-        example_ham = "Oi, tudo bem? Vamos nos encontrar amanhã no cinema às 19h?"
-        if st.button("Testar HAM", key="ham_example"):
-            prediction, probability = predict_spam(example_ham, model, threshold)
-            if prediction is not None:
-                result = "SPAM" if prediction == 1 else "HAM"
-                prob = probability[1] * 100
-                st.write(f"**{selected_model}**: {result} (Prob. SPAM: {prob:.1f}%)")
-    
-    with col2:
-        st.markdown("**Exemplo de SPAM:**")
-        example_spam = "PARABÉNS! Você ganhou um prêmio de R$ 10.000! Clique aqui urgentemente para resgatar sua oferta grátis!"
-        if st.button("Testar SPAM", key="spam_example"):
-            prediction, probability = predict_spam(example_spam, model, threshold)
-            if prediction is not None:
-                result = "SPAM" if prediction == 1 else "HAM"
-                prob = probability[1] * 100
-                st.write(f"**{selected_model}**: {result} (Prob. SPAM: {prob:.1f}%)")
     
     # Comparação entre todos os modelos
     st.markdown("---")
