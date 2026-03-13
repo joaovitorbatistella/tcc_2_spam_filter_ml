@@ -61,6 +61,7 @@ st.sidebar.info(MODELS_CONFIG[selected_model]["description"])
 st.sidebar.markdown("---")
 st.sidebar.header("ℹ️ Sobre a Aplicação")
 st.sidebar.write("Esta aplicação utiliza machine learning para classificar mensagens como SPAM ou HAM (mensagem legítima).")
+st.sidebar.write("**IMPORTANTE**: Os modelos foram treinados no idioma **Inglês**, quaisquer mensagens em outro idioma estão sujeitas a resultados errados")
 st.sidebar.write("**HAM**: Mensagem legítima")
 st.sidebar.write("**SPAM**: Mensagem indesejada")
 
